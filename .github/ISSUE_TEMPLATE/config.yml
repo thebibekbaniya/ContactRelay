@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/
+    about: Do not file public issues for vulnerabilities or exposed secrets. Use private vulnerability reporting or the maintainer-designated private channel.

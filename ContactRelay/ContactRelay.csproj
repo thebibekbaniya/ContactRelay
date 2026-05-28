@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<UserSecretsId>ContactRelay.OpenSource.UserSecrets</UserSecretsId>
+		<OutputType>Exe</OutputType>
+		<PublishSingleFile Condition="'$(Configuration)' == 'Release'">true</PublishSingleFile>
+		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
+		<PlatformTarget>x64</PlatformTarget>
+		<Version>1.0.0</Version>
+		<Description>Microsoft 365 mailbox contact synchronization worker service.</Description>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="..\README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Azure.Identity" Version="1.21.0" />
+		<PackageReference Include="Dapper" Version="2.1.79" />
+		<PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
+		<PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.8" />
+		<PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
+		<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.8" />
+		<PackageReference Include="Microsoft.Graph" Version="6.1.0" />
+		<PackageReference Include="Microsoft.Kiota.Abstractions" Version="2.0.0" />
+		<PackageReference Include="Sentry.Extensions.Logging" Version="6.6.0" />
+	</ItemGroup>
+</Project>
