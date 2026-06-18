@@ -34,6 +34,12 @@ flowchart LR
     Repository --> Sql["SQL Server"]
 ```
 
+### Synced contact fields
+
+ContactRelay maps these Entra ID user fields onto each managed Outlook contact: display name, first/last name, job title, department, company name, **manager** (the manager's display name), mobile phone, business (desk) phone, and email address.
+
+Sync metadata — the managed marker, the source user object id, and a field hash used for change detection — is stored in **hidden MAPI extended properties** on the contact, under a private property set. These values are not shown in Outlook or OWA. Earlier versions stored this metadata in the contact's personal notes field; those contacts are migrated automatically (the notes are cleared and the extended properties written) the next time each contact is updated.
+
 ## Prerequisites
 
 - Windows Server, Windows client, or Windows VM capable of running a worker service.
@@ -108,7 +114,7 @@ Required secrets and tenant values should come from environment variables, .NET 
 | `LegacyContactFolderName` | Optional old folder name to remove after successful sync. |
 | `LegacyManagedFolderNames` | Additional old folder names to remove after successful sync. |
 | `ManagedCategory` | Outlook category used to identify managed contacts. |
-| `ManagedByMarker` | Metadata marker written to managed contact notes. |
+| `ManagedByMarker` | Metadata marker stored in the contact's hidden extended properties (not the user-visible notes field). |
 | `CompanyName` | Optional company value written to managed contacts. |
 | `DeleteOutOfScopeContacts` | Deletes managed contacts whose source users are no longer in scope; default is `false` for safe rollout. |
 | `DeleteLegacyFolderAfterSuccessfulSync` | Removes configured legacy folders only after successful mailbox sync; default is `false` for safe rollout. |

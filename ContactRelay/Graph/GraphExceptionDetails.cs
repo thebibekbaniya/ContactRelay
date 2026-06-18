@@ -27,6 +27,26 @@ public sealed record GraphExceptionDetails(
             innerError?.ClientRequestId ?? GetHeaderValue(apiException, "client-request-id"));
     }
 
+    /// <summary>
+    /// Exchange store error code returned when a folder cannot be deleted, e.g. a default
+    /// or otherwise protected contact folder. Such folders can be emptied but never removed.
+    /// </summary>
+    public const string FolderCannotBeDeletedCode = "ErrorCannotDeleteObject";
+
+    public bool IndicatesFolderCannotBeDeleted =>
+        string.Equals(Code, FolderCannotBeDeletedCode, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Exchange store error code returned when an item no longer exists. A delete that
+    /// reports this has already achieved its goal (e.g. the item was removed by a prior,
+    /// retried batch attempt), so callers should treat it as success.
+    /// </summary>
+    public const string ItemNotFoundCode = "ErrorItemNotFound";
+
+    public bool IndicatesItemAlreadyDeleted =>
+        StatusCode == 404 ||
+        string.Equals(Code, ItemNotFoundCode, StringComparison.OrdinalIgnoreCase);
+
     public string ToSummary()
     {
         var parts = new List<string>();

@@ -493,7 +493,7 @@ ALTER TABLE [dbo].[MailboxFolderSyncState]  WITH CHECK ADD  CONSTRAINT [CK_Mailb
 GO
 ALTER TABLE [dbo].[MailboxFolderSyncState] CHECK CONSTRAINT [CK_MailboxFolderSyncState_LastMailboxSyncStatus]
 GO
-ALTER TABLE [dbo].[MailboxFolderSyncState]  WITH CHECK ADD  CONSTRAINT [CK_MailboxFolderSyncState_LegacyFolderCleanupStatus] CHECK  (([LegacyFolderCleanupStatus] IS NULL OR ([LegacyFolderCleanupStatus]='Failed' OR [LegacyFolderCleanupStatus]='Deleted' OR [LegacyFolderCleanupStatus]='SkippedDryRun' OR [LegacyFolderCleanupStatus]='NotFound')))
+ALTER TABLE [dbo].[MailboxFolderSyncState]  WITH CHECK ADD  CONSTRAINT [CK_MailboxFolderSyncState_LegacyFolderCleanupStatus] CHECK  (([LegacyFolderCleanupStatus] IS NULL OR ([LegacyFolderCleanupStatus]='Failed' OR [LegacyFolderCleanupStatus]='Deleted' OR [LegacyFolderCleanupStatus]='Emptied' OR [LegacyFolderCleanupStatus]='SkippedDryRun' OR [LegacyFolderCleanupStatus]='NotFound')))
 GO
 ALTER TABLE [dbo].[MailboxFolderSyncState] CHECK CONSTRAINT [CK_MailboxFolderSyncState_LegacyFolderCleanupStatus]
 GO
@@ -569,12 +569,13 @@ USING
         (N'LegacyManagedFolderNames', N'', N'StringList', N'Comma-separated legacy contact folder names to delete after successful sync.')
 ) AS source (SettingKey, SettingValue, ValueType, Description)
 ON target.SettingKey = source.SettingKey
+-- Seed defaults only. Do NOT overwrite SettingValue or IsEnabled for existing rows:
+-- those are operator-tuned (e.g. DryRun, legacy-folder settings) and re-running this
+-- script must not silently reset them. Only the descriptive metadata is refreshed.
 WHEN MATCHED THEN
     UPDATE SET
-        SettingValue = source.SettingValue,
         ValueType = source.ValueType,
         Description = source.Description,
-        IsEnabled = 1,
         UpdatedUtc = SYSUTCDATETIME()
 WHEN NOT MATCHED BY TARGET THEN
     INSERT (SettingKey, SettingValue, ValueType, Description, IsEnabled, CreatedUtc, UpdatedUtc)
@@ -590,6 +591,7 @@ USING
         (N'jobTitle', N'Contact.JobTitle', NULL),
         (N'department', N'Contact.Department', NULL),
         (N'companyName', N'Contact.CompanyName', NULL),
+        (N'manager', N'Contact.Manager', NULL),
         (N'mobilePhone', N'Contact.MobilePhone', N'PreferredPhone'),
         (N'businessPhones[0]', N'Contact.BusinessPhones[0]', NULL),
         (N'mail', N'Contact.EmailAddresses[0].Address', NULL)
