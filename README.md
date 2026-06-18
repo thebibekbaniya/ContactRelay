@@ -164,6 +164,33 @@ Required secrets and tenant values should come from environment variables, .NET 
 | `Debug` | Enables Sentry SDK debug output. |
 | `TracesSampleRate` | Optional trace sample rate. |
 
+### Logging Settings
+
+Logs are written to the console, the Windows Event Log (source name = `Service:Name`), Sentry (only when a DSN is set; `Information` is recorded as breadcrumbs and only `Error`+ becomes a Sentry issue), and — when explicitly enabled — a rolling daily file. Category levels are controlled by `Logging:LogLevel`.
+
+| Option | Description |
+| --- | --- |
+| `Logging:LogLevel:Default` | Minimum level for application logs across all providers. |
+| `Logging:File:Enabled` | Opt-in switch for the rolling file log. Default `false` (no file is written). |
+| `Logging:File:Directory` | Folder to write logs into. The service writes `contactrelay-<date>.log` here. If empty or not writable, it falls back to `%ProgramData%\ContactRelay\logs`; if that is also not writable, file logging is skipped (startup still succeeds). Relative paths resolve against the content root. |
+| `Logging:File:RetainedFileCountLimit` | Number of daily files to keep (default `31`). |
+| `Logging:File:FileSizeLimitBytes` | Per-file size cap before rolling within a day (default `52428800`, 50 MB). |
+
+The file sink is off by default; enable it with `Logging:File:Enabled = true`. It matters most under the Windows Service, where console output is not captured anywhere. It records run lifecycle, per-mailbox failures, warnings, and the run summary.
+
+**Per-item detail (what/why/which mailbox) is in SQL, not the logs.** Every action is recorded in `dbo.SyncRunItem` (`TargetMailboxUpn`, `Action`, `Result`, `ErrorCode`, `Message`) and the run totals in `dbo.SyncRun`. Unlike the logs, these store the real mailbox UPN regardless of `LogSensitiveIdentifiers`. To investigate a run:
+
+```sql
+-- failures for a run: what, which mailbox, why
+SELECT TargetMailboxUpn, Action, Result, ErrorCode, Message
+FROM dbo.SyncRunItem WHERE SyncRunId = @RunId AND Result = 'Failed';
+
+-- skips grouped by reason
+SELECT Message, COUNT(*) AS Cnt
+FROM dbo.SyncRunItem WHERE SyncRunId = @RunId AND Result = 'Skipped'
+GROUP BY Message ORDER BY Cnt DESC;
+```
+
 
 ## Example appsettings.json
 
