@@ -268,8 +268,16 @@ dotnet build .\ContactRelay.slnx -c Release
 The SQL scripts use a SQLCMD variable named `DatabaseName`.
 
 ```powershell
-sqlcmd -S SQL_SERVER_NAME -E -v DatabaseName="CONTACT_RELAY_DATABASE" -i .\sql\001 CreateSchema.sql
+sqlcmd -S SQL_SERVER_NAME -E -v DatabaseName="CONTACT_RELAY_DATABASE" -i ".\sql\001 CreateSchema.sql"
 ```
+
+Apply the numbered migration scripts (`002 …`, `003 …`) in order on existing databases. Then optionally create the monitoring views (re-runnable; safe to apply any time):
+
+```powershell
+sqlcmd -S SQL_SERVER_NAME -E -v DatabaseName="CONTACT_RELAY_DATABASE" -i ".\sql\003 Monitoring Views.sql"
+```
+
+These views give a quick operational picture — start with `dbo.vw_SyncDashboard` (last run, status, headline counts) and `dbo.vw_MailboxesNeedingAttention` (actionable list with reasons). See `Logging Settings` for what is captured where.
 
 Use an authentication method approved by your organization. Avoid putting SQL passwords in shell history or committed scripts.
 
