@@ -360,6 +360,7 @@ Recommended pilot flow:
 8. Set `Sync:DryRun` to `false` only after the plan is approved.
 
 - SQL failures occur: verify connection string, database schema, service identity rights, and command timeout.
+- A target reports `MailboxNotEnabledForRESTAPI`: the mailbox is not reachable via Microsoft Graph/REST (on-premises/hybrid mailbox, an unlicensed user, or a mail user/contact with no Exchange Online mailbox). ContactRelay skips it (status `Skipped`, logged as a warning, not counted as an error) and continues. Narrow the targeted mailbox scope to exclude such accounts if the warnings are noisy.
 
 ## Testing
 

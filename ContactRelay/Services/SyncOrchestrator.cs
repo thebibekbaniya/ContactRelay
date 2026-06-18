@@ -474,6 +474,28 @@ public sealed class SyncOrchestrator(
         catch (Exception ex)
         {
             var graphError = GraphExceptionDetails.From(ex);
+
+            // Some targets can never be synced via Graph (on-premises/hybrid mailbox, an
+            // unlicensed user, or a mail user/contact with no Exchange Online mailbox). That
+            // is an environmental fact, not a ContactRelay failure, so skip the mailbox rather
+            // than counting it as an error that would mark the whole run CompletedWithErrors.
+            if (graphError.IndicatesMailboxNotRestEnabled)
+            {
+                runItems.Add(new SyncRunItemDto(
+                    mailbox.UserPrincipalName, null, SyncAction.Skip, SyncActionResult.Skipped,
+                    "Mailbox is not enabled for Microsoft Graph/REST (on-premises mailbox, no Exchange Online mailbox, or unlicensed); skipped.",
+                    null, ex.GetType().Name));
+                await repository.AddRunItemsBulkAsync(syncRunId, runItems, CancellationToken.None);
+                await repository.UpsertMailboxFolderStateAsync(
+                    mailbox.UserPrincipalName, managedFolderName, folderId,
+                    "Skipped", graphError.ToSummary(), CancellationToken.None);
+                logger.LogWarning(
+                    "Mailbox {Mailbox} is not enabled for Microsoft Graph/REST and was skipped. GraphError={GraphError}",
+                    LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions),
+                    graphError.ToSummary());
+                return new MailboxSyncCounts(0, 0, 0, 0, 0);
+            }
+
             runItems.Add(new SyncRunItemDto(
                 mailbox.UserPrincipalName, null, SyncAction.Error, SyncActionResult.Failed,
                 $"Mailbox sync failed: {graphError.ToSummary()}", null, ex.GetType().Name));

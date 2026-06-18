@@ -489,7 +489,7 @@ ON DELETE CASCADE
 GO
 ALTER TABLE [dbo].[SyncRunItem] CHECK CONSTRAINT [FK_SyncRunItem_SyncRun]
 GO
-ALTER TABLE [dbo].[MailboxFolderSyncState]  WITH CHECK ADD  CONSTRAINT [CK_MailboxFolderSyncState_LastMailboxSyncStatus] CHECK  (([LastMailboxSyncStatus]='Failed' OR [LastMailboxSyncStatus]='CompletedWithErrors' OR [LastMailboxSyncStatus]='Success' OR [LastMailboxSyncStatus]='Running' OR [LastMailboxSyncStatus]='Unknown'))
+ALTER TABLE [dbo].[MailboxFolderSyncState]  WITH CHECK ADD  CONSTRAINT [CK_MailboxFolderSyncState_LastMailboxSyncStatus] CHECK  (([LastMailboxSyncStatus]='Failed' OR [LastMailboxSyncStatus]='CompletedWithErrors' OR [LastMailboxSyncStatus]='Success' OR [LastMailboxSyncStatus]='Running' OR [LastMailboxSyncStatus]='Skipped' OR [LastMailboxSyncStatus]='Unknown'))
 GO
 ALTER TABLE [dbo].[MailboxFolderSyncState] CHECK CONSTRAINT [CK_MailboxFolderSyncState_LastMailboxSyncStatus]
 GO

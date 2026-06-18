@@ -158,6 +158,30 @@ public sealed class SyncOrchestratorTests
     }
 
     [Fact]
+    public async Task RunAsync_SkipsMailboxNotEnabledForRest()
+    {
+        var source = SourceContact();
+        var fixture = Fixture(false, source);
+        fixture.Repository.TargetMailboxes =
+        [
+            TargetMailbox(Mailbox),
+            TargetMailbox("second@example.test")
+        ];
+        fixture.MailboxGraph.NotRestEnabledMailboxes.Add(Mailbox);
+
+        var summary = await fixture.Orchestrator.RunAsync(CancellationToken.None);
+
+        // A non-REST mailbox is skipped, not failed: it must not inflate the error count.
+        Assert.Equal(0, summary.ErrorCount);
+        Assert.Contains(fixture.Repository.FolderStatesWritten,
+            state => state.TargetMailboxUpn == Mailbox && state.Status == "Skipped");
+        Assert.Contains(fixture.Repository.RunItems,
+            item => item.TargetMailboxUpn == Mailbox && item.Action == SyncAction.Skip && item.Result == SyncActionResult.Skipped);
+        Assert.DoesNotContain(fixture.Repository.RunItems,
+            item => item.TargetMailboxUpn == Mailbox && item.Action == SyncAction.Error);
+    }
+
+    [Fact]
     public async Task RunAsync_RenamesManagedFolderBackWhenRenamedInOutlook()
     {
         var source = SourceContact();
@@ -381,9 +405,22 @@ public sealed class SyncOrchestratorTests
 
         public HashSet<string> FailManagedContactReadFor { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        public HashSet<string> NotRestEnabledMailboxes { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         public Task<IReadOnlyList<ContactFolder>> GetContactFoldersAsync(string mailboxUpn,
             CancellationToken cancellationToken)
         {
+            if (NotRestEnabledMailboxes.Contains(mailboxUpn))
+                throw new ODataError
+                {
+                    ResponseStatusCode = 404,
+                    Error = new MainError
+                    {
+                        Code = GraphExceptionDetails.MailboxNotRestEnabledCode,
+                        Message = "REST API is not yet supported for this mailbox."
+                    }
+                };
+
             return Task.FromResult(Folders);
         }
 

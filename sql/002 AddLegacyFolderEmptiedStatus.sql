@@ -17,3 +17,18 @@ ALTER TABLE [dbo].[MailboxFolderSyncState]  WITH CHECK ADD  CONSTRAINT [CK_Mailb
 GO
 ALTER TABLE [dbo].[MailboxFolderSyncState] CHECK CONSTRAINT [CK_MailboxFolderSyncState_LegacyFolderCleanupStatus]
 GO
+
+-- Allow the 'Skipped' mailbox sync status. This is recorded when a target cannot be synced
+-- via Microsoft Graph/REST (MailboxNotEnabledForRESTAPI: on-premises/hybrid mailbox, an
+-- unlicensed user, or a mail user/contact with no Exchange Online mailbox). Such targets are
+-- skipped instead of counted as failures. Safe to run repeatedly.
+IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_MailboxFolderSyncState_LastMailboxSyncStatus')
+BEGIN
+    ALTER TABLE [dbo].[MailboxFolderSyncState] DROP CONSTRAINT [CK_MailboxFolderSyncState_LastMailboxSyncStatus];
+END
+GO
+
+ALTER TABLE [dbo].[MailboxFolderSyncState]  WITH CHECK ADD  CONSTRAINT [CK_MailboxFolderSyncState_LastMailboxSyncStatus] CHECK  (([LastMailboxSyncStatus]='Failed' OR [LastMailboxSyncStatus]='CompletedWithErrors' OR [LastMailboxSyncStatus]='Success' OR [LastMailboxSyncStatus]='Running' OR [LastMailboxSyncStatus]='Skipped' OR [LastMailboxSyncStatus]='Unknown'))
+GO
+ALTER TABLE [dbo].[MailboxFolderSyncState] CHECK CONSTRAINT [CK_MailboxFolderSyncState_LastMailboxSyncStatus]
+GO

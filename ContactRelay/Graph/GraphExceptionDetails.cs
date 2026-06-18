@@ -47,6 +47,17 @@ public sealed record GraphExceptionDetails(
         StatusCode == 404 ||
         string.Equals(Code, ItemNotFoundCode, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Graph/Exchange error returned when the target is not a REST/Graph-accessible mailbox
+    /// (e.g. an on-premises/hybrid mailbox, an unlicensed user, or a mail user/contact with no
+    /// Exchange Online mailbox). Such a target can never be synced, so it should be skipped
+    /// rather than treated as a failure.
+    /// </summary>
+    public const string MailboxNotRestEnabledCode = "MailboxNotEnabledForRESTAPI";
+
+    public bool IndicatesMailboxNotRestEnabled =>
+        string.Equals(Code, MailboxNotRestEnabledCode, StringComparison.OrdinalIgnoreCase);
+
     public string ToSummary()
     {
         var parts = new List<string>();
