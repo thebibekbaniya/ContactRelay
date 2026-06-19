@@ -90,6 +90,76 @@ public sealed class ContactMapperTests
         Assert.True(managed.HasPersonalNotes);
     }
 
+    [Fact]
+    public void ToGraphContact_StoresMetadataInHiddenPropertiesAndClearsNotes()
+    {
+        var userId = Guid.NewGuid();
+        var user = new User
+        {
+            Id = userId.ToString(),
+            UserPrincipalName = "person@example.test",
+            Mail = "person@example.test",
+            GivenName = "First",
+            Surname = "Last",
+            DisplayName = "First Last",
+            AccountEnabled = true
+        };
+        var source = _mapper.MapUser(user, "Manager Name", _options);
+
+        var contact = _mapper.ToGraphContact(source, _options);
+
+        // Notes must carry no metadata; that field is visible to users in Outlook.
+        Assert.True(string.IsNullOrEmpty(contact.PersonalNotes));
+        Assert.Equal("Manager Name", contact.Manager);
+
+        var props = contact.SingleValueExtendedProperties!;
+        Assert.Contains(props, p => p.Id == ContactMetadata.SourceUserObjectIdPropertyId && p.Value == userId.ToString());
+        Assert.Contains(props, p => p.Id == ContactMetadata.FieldHashPropertyId && p.Value == source.FieldHash);
+        Assert.Contains(props, p => p.Id == ContactMetadata.ManagedMarkerPropertyId && p.Value == _options.ManagedByMarker);
+    }
+
+    [Fact]
+    public void ToManagedContact_ReadsHiddenExtendedProperties()
+    {
+        var source = SourceContact();
+        var graphContact = _mapper.ToGraphContact(source, _options);
+        graphContact.Id = "contact-id";
+
+        var managed = _mapper.ToManagedContact(graphContact, _options.ManagedCategory);
+
+        Assert.True(managed.IsManaged);
+        Assert.Equal(source.SourceUserObjectId, managed.SourceUserObjectId);
+        Assert.Equal(source.FieldHash, managed.FieldHash);
+        Assert.False(managed.HasPersonalNotes);
+    }
+
+    [Fact]
+    public void ToManagedContact_FallsBackToLegacyNotesWhenExtendedPropertiesMissing()
+    {
+        var sourceId = Guid.NewGuid();
+        var contact = new Contact
+        {
+            Id = "contact-id",
+            GivenName = "First",
+            Surname = "Last",
+            Categories = [],
+            PersonalNotes = string.Join(
+                Environment.NewLine,
+                "ManagedBy=ContactRelay",
+                $"SourceUserObjectId={sourceId}",
+                "FieldHash=ABC123")
+        };
+
+        var managed = _mapper.ToManagedContact(contact, _options.ManagedCategory);
+
+        // Legacy contacts (notes only, no category, no extended props) must still be
+        // recognized so they match and get migrated on their next update.
+        Assert.True(managed.IsManaged);
+        Assert.Equal(sourceId, managed.SourceUserObjectId);
+        Assert.Equal("ABC123", managed.FieldHash);
+        Assert.True(managed.HasPersonalNotes);
+    }
+
     private static DirectoryContact SourceContact()
     {
         var sourceId = Guid.NewGuid();
@@ -115,6 +185,7 @@ public sealed class ContactMapperTests
                 JobTitle = (string?)null,
                 Department = (string?)null,
                 CompanyName = "Example Organization",
+                Manager = (string?)null,
                 MobilePhone = "555-0100",
                 DeskPhone = "555-0101",
                 Email = "person@example.test"

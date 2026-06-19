@@ -53,6 +53,7 @@ public sealed partial class ContactMapper : IContactMapper
                 contact.JobTitle,
                 contact.Department,
                 contact.CompanyName,
+                contact.Manager,
                 contact.MobilePhone,
                 contact.DeskPhone,
                 contact.Email
@@ -70,6 +71,7 @@ public sealed partial class ContactMapper : IContactMapper
             JobTitle = source.JobTitle,
             Department = source.Department,
             CompanyName = options.CompanyName,
+            Manager = source.Manager,
             MobilePhone = source.MobilePhone,
             BusinessPhones = string.IsNullOrWhiteSpace(source.DeskPhone) ? [] : [source.DeskPhone],
             EmailAddresses =
@@ -81,7 +83,11 @@ public sealed partial class ContactMapper : IContactMapper
                 }
             ],
             Categories = [options.ManagedCategory],
-            PersonalNotes = BuildManagedNotes(source, options)
+            // Sync metadata lives in hidden extended properties, not the user-visible notes
+            // field. Clearing notes removes the legacy metadata from contacts created by
+            // earlier versions when they are next updated.
+            PersonalNotes = "",
+            SingleValueExtendedProperties = BuildMetadataProperties(source, options)
         };
 
         return contact;
@@ -89,10 +95,16 @@ public sealed partial class ContactMapper : IContactMapper
 
     public ManagedMailboxContact ToManagedContact(Contact contact, string managedCategory)
     {
-        var sourceUserObjectId = ExtractGuid(contact.PersonalNotes, SourcePrefix);
-        var fieldHash = ExtractValue(contact.PersonalNotes, HashPrefix);
+        // Read from the hidden extended properties first, falling back to the legacy notes
+        // metadata so contacts created by earlier versions still match until updated.
+        var sourceUserObjectId = ReadExtendedGuid(contact, ContactMetadata.SourceUserObjectIdPropertyId)
+                                 ?? ExtractGuid(contact.PersonalNotes, SourcePrefix);
+        var fieldHash = ReadExtendedProperty(contact, ContactMetadata.FieldHashPropertyId)
+                        ?? ExtractValue(contact.PersonalNotes, HashPrefix);
+        var hasMarker = ReadExtendedProperty(contact, ContactMetadata.ManagedMarkerPropertyId) is not null
+                        || ContainsLegacyMetadata(contact.PersonalNotes);
         var hasCategory = contact.Categories?.Any(category => string.Equals(category, managedCategory, StringComparison.OrdinalIgnoreCase)) == true;
-        var isManaged = hasCategory || sourceUserObjectId.HasValue;
+        var isManaged = hasCategory || sourceUserObjectId.HasValue || hasMarker;
 
         return new ManagedMailboxContact
         {
@@ -108,22 +120,50 @@ public sealed partial class ContactMapper : IContactMapper
                 JobTitle = Normalize(contact.JobTitle),
                 Department = Normalize(contact.Department),
                 CompanyName = Normalize(contact.CompanyName),
+                Manager = Normalize(contact.Manager),
                 MobilePhone = NormalizePhone(contact.MobilePhone),
                 DeskPhone = NormalizePhone(contact.BusinessPhones?.FirstOrDefault(phone => !string.IsNullOrWhiteSpace(phone))),
                 Email = NormalizeEmail(contact.EmailAddresses?.FirstOrDefault()?.Address)
             }),
-            HasPersonalNotes = HasUserAuthoredNotes(contact.PersonalNotes),
+            HasPersonalNotes = !string.IsNullOrWhiteSpace(contact.PersonalNotes),
             IsManaged = isManaged
         };
     }
 
-    private static string BuildManagedNotes(DirectoryContact source, SyncWorkerOptions options)
+    private static List<SingleValueLegacyExtendedProperty> BuildMetadataProperties(DirectoryContact source, SyncWorkerOptions options)
     {
-        return string.Join(
-            Environment.NewLine,
-            options.ManagedByMarker,
-            $"{SourcePrefix}{source.SourceUserObjectId}",
-            $"{HashPrefix}{source.FieldHash}");
+        return
+        [
+            new SingleValueLegacyExtendedProperty
+            {
+                Id = ContactMetadata.ManagedMarkerPropertyId,
+                Value = options.ManagedByMarker
+            },
+            new SingleValueLegacyExtendedProperty
+            {
+                Id = ContactMetadata.SourceUserObjectIdPropertyId,
+                Value = source.SourceUserObjectId.ToString()
+            },
+            new SingleValueLegacyExtendedProperty
+            {
+                Id = ContactMetadata.FieldHashPropertyId,
+                Value = source.FieldHash
+            }
+        ];
+    }
+
+    private static string? ReadExtendedProperty(Contact contact, string propertyId)
+    {
+        var value = contact.SingleValueExtendedProperties?
+            .FirstOrDefault(p => string.Equals(p.Id, propertyId, StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static Guid? ReadExtendedGuid(Contact contact, string propertyId)
+    {
+        return Guid.TryParse(ReadExtendedProperty(contact, propertyId), out var guid) ? guid : null;
     }
 
     private static string? FirstNonEmpty(params string?[] values)
@@ -178,7 +218,7 @@ public sealed partial class ContactMapper : IContactMapper
         return line is null ? null : line[prefix.Length..].Trim();
     }
 
-    private static bool HasUserAuthoredNotes(string? notes)
+    private static bool ContainsLegacyMetadata(string? notes)
     {
         if (string.IsNullOrWhiteSpace(notes))
         {
@@ -187,9 +227,9 @@ public sealed partial class ContactMapper : IContactMapper
 
         return notes
             .Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Any(line => !line.StartsWith("ManagedBy=", StringComparison.OrdinalIgnoreCase)
-                         && !line.StartsWith(SourcePrefix, StringComparison.OrdinalIgnoreCase)
-                         && !line.StartsWith(HashPrefix, StringComparison.OrdinalIgnoreCase));
+            .Any(line => line.StartsWith("ManagedBy=", StringComparison.OrdinalIgnoreCase)
+                         || line.StartsWith(SourcePrefix, StringComparison.OrdinalIgnoreCase)
+                         || line.StartsWith(HashPrefix, StringComparison.OrdinalIgnoreCase));
     }
 
     [GeneratedRegex(@"\s+")]

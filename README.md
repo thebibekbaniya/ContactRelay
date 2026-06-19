@@ -34,6 +34,12 @@ flowchart LR
     Repository --> Sql["SQL Server"]
 ```
 
+### Synced contact fields
+
+ContactRelay maps these Entra ID user fields onto each managed Outlook contact: display name, first/last name, job title, department, company name, **manager** (the manager's display name), mobile phone, business (desk) phone, and email address.
+
+Sync metadata — the managed marker, the source user object id, and a field hash used for change detection — is stored in **hidden MAPI extended properties** on the contact, under a private property set. These values are not shown in Outlook or OWA. Earlier versions stored this metadata in the contact's personal notes field; those contacts are migrated automatically (the notes are cleared and the extended properties written) the next time each contact is updated.
+
 ## Prerequisites
 
 - Windows Server, Windows client, or Windows VM capable of running a worker service.
@@ -108,7 +114,7 @@ Required secrets and tenant values should come from environment variables, .NET 
 | `LegacyContactFolderName` | Optional old folder name to remove after successful sync. |
 | `LegacyManagedFolderNames` | Additional old folder names to remove after successful sync. |
 | `ManagedCategory` | Outlook category used to identify managed contacts. |
-| `ManagedByMarker` | Metadata marker written to managed contact notes. |
+| `ManagedByMarker` | Metadata marker stored in the contact's hidden extended properties (not the user-visible notes field). |
 | `CompanyName` | Optional company value written to managed contacts. |
 | `DeleteOutOfScopeContacts` | Deletes managed contacts whose source users are no longer in scope; default is `false` for safe rollout. |
 | `DeleteLegacyFolderAfterSuccessfulSync` | Removes configured legacy folders only after successful mailbox sync; default is `false` for safe rollout. |
@@ -157,6 +163,33 @@ Required secrets and tenant values should come from environment variables, .NET 
 | `Release` | Optional release tag. |
 | `Debug` | Enables Sentry SDK debug output. |
 | `TracesSampleRate` | Optional trace sample rate. |
+
+### Logging Settings
+
+Logs are written to the console, the Windows Event Log (source name = `Service:Name`), Sentry (only when a DSN is set; `Information` is recorded as breadcrumbs and only `Error`+ becomes a Sentry issue), and — when explicitly enabled — a rolling daily file. Category levels are controlled by `Logging:LogLevel`.
+
+| Option | Description |
+| --- | --- |
+| `Logging:LogLevel:Default` | Minimum level for application logs across all providers. |
+| `Logging:File:Enabled` | Opt-in switch for the rolling file log. Default `false` (no file is written). |
+| `Logging:File:Directory` | Folder to write logs into. The service writes `contactrelay-<date>.log` here. If empty or not writable, it falls back to `%ProgramData%\ContactRelay\logs`; if that is also not writable, file logging is skipped (startup still succeeds). Relative paths resolve against the content root. |
+| `Logging:File:RetainedFileCountLimit` | Number of daily files to keep (default `31`). |
+| `Logging:File:FileSizeLimitBytes` | Per-file size cap before rolling within a day (default `52428800`, 50 MB). |
+
+The file sink is off by default; enable it with `Logging:File:Enabled = true`. It matters most under the Windows Service, where console output is not captured anywhere. It records run lifecycle, per-mailbox failures, warnings, and the run summary.
+
+**Per-item detail (what/why/which mailbox) is in SQL, not the logs.** Every action is recorded in `dbo.SyncRunItem` (`TargetMailboxUpn`, `Action`, `Result`, `ErrorCode`, `Message`) and the run totals in `dbo.SyncRun`. Unlike the logs, these store the real mailbox UPN regardless of `LogSensitiveIdentifiers`. To investigate a run:
+
+```sql
+-- failures for a run: what, which mailbox, why
+SELECT TargetMailboxUpn, Action, Result, ErrorCode, Message
+FROM dbo.SyncRunItem WHERE SyncRunId = @RunId AND Result = 'Failed';
+
+-- skips grouped by reason
+SELECT Message, COUNT(*) AS Cnt
+FROM dbo.SyncRunItem WHERE SyncRunId = @RunId AND Result = 'Skipped'
+GROUP BY Message ORDER BY Cnt DESC;
+```
 
 
 ## Example appsettings.json
@@ -235,8 +268,16 @@ dotnet build .\ContactRelay.slnx -c Release
 The SQL scripts use a SQLCMD variable named `DatabaseName`.
 
 ```powershell
-sqlcmd -S SQL_SERVER_NAME -E -v DatabaseName="CONTACT_RELAY_DATABASE" -i .\sql\001 CreateSchema.sql
+sqlcmd -S SQL_SERVER_NAME -E -v DatabaseName="CONTACT_RELAY_DATABASE" -i ".\sql\001 CreateSchema.sql"
 ```
+
+Apply the numbered migration scripts (`002 …`, `003 …`) in order on existing databases. Then optionally create the monitoring views (re-runnable; safe to apply any time):
+
+```powershell
+sqlcmd -S SQL_SERVER_NAME -E -v DatabaseName="CONTACT_RELAY_DATABASE" -i ".\sql\003 Monitoring Views.sql"
+```
+
+These views give a quick operational picture — start with `dbo.vw_SyncDashboard` (last run, status, headline counts) and `dbo.vw_MailboxesNeedingAttention` (actionable list with reasons). See `Logging Settings` for what is captured where.
 
 Use an authentication method approved by your organization. Avoid putting SQL passwords in shell history or committed scripts.
 
@@ -327,6 +368,7 @@ Recommended pilot flow:
 8. Set `Sync:DryRun` to `false` only after the plan is approved.
 
 - SQL failures occur: verify connection string, database schema, service identity rights, and command timeout.
+- A target reports `MailboxNotEnabledForRESTAPI`: the mailbox is not reachable via Microsoft Graph/REST (on-premises/hybrid mailbox, an unlicensed user, or a mail user/contact with no Exchange Online mailbox). ContactRelay skips it (status `Skipped`, logged as a warning, not counted as an error) and continues. Narrow the targeted mailbox scope to exclude such accounts if the warnings are noisy.
 
 ## Testing
 

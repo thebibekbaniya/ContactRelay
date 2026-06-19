@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Options;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
@@ -69,6 +70,48 @@ public sealed class MailboxContactGraphService(
             cancellationToken);
     }
 
+    public Task RenameManagedFolderAsync(string mailboxUpn, string folderId, string newName, CancellationToken cancellationToken)
+    {
+        return retryHandler.ExecuteAsync(
+            ct => graph.Users[mailboxUpn].ContactFolders[folderId].PatchAsync(
+                new ContactFolder { DisplayName = newName }, cancellationToken: ct),
+            cancellationToken);
+    }
+
+    public async Task<FolderEmptyResult> EmptyManagedFolderAsync(string mailboxUpn, string folderId, CancellationToken cancellationToken)
+    {
+        var contactIds = new List<string>();
+        var page = await retryHandler.ExecuteAsync(
+            ct => graph.Users[mailboxUpn].ContactFolders[folderId].Contacts.GetAsync(request =>
+            {
+                request.QueryParameters.Top = _options.PageSize;
+                request.QueryParameters.Select = ["id"];
+            }, ct),
+            cancellationToken);
+
+        while (page is not null)
+        {
+            if (page.Value is not null)
+                contactIds.AddRange(page.Value
+                    .Select(c => c.Id)
+                    .Where(id => !string.IsNullOrWhiteSpace(id))!);
+
+            if (string.IsNullOrWhiteSpace(page.OdataNextLink))
+                break;
+
+            var nextLink = page.OdataNextLink;
+            page = await retryHandler.ExecuteAsync(
+                ct => graph.Users[mailboxUpn].ContactFolders[folderId].Contacts.WithUrl(nextLink).GetAsync(cancellationToken: ct),
+                cancellationToken);
+        }
+
+        if (contactIds.Count == 0)
+            return new FolderEmptyResult(0, 0);
+
+        var failed = await BatchDeleteContactsAsync(mailboxUpn, folderId, contactIds, cancellationToken);
+        return new FolderEmptyResult(contactIds.Count - failed.Count, failed.Count);
+    }
+
     public async Task<IReadOnlyList<ManagedMailboxContact>> GetManagedContactsAsync(
         string mailboxUpn,
         string folderId,
@@ -83,9 +126,12 @@ public sealed class MailboxContactGraphService(
                 request.QueryParameters.Select =
                 [
                     "id", "displayName", "givenName", "surname", "companyName", "jobTitle",
-                    "department", "mobilePhone", "businessPhones", "emailAddresses",
+                    "department", "manager", "mobilePhone", "businessPhones", "emailAddresses",
                     "categories", "personalNotes"
                 ];
+                // Hidden sync metadata is stored in extended properties; the legacy notes
+                // field is still selected so contacts from earlier versions still match.
+                request.QueryParameters.Expand = [ContactMetadata.ExpandClause];
             }, ct),
             cancellationToken);
 
@@ -132,11 +178,19 @@ public sealed class MailboxContactGraphService(
             cancellationToken);
     }
 
-    public Task DeleteContactAsync(string mailboxUpn, string folderId, string contactId, CancellationToken cancellationToken)
+    public async Task DeleteContactAsync(string mailboxUpn, string folderId, string contactId, CancellationToken cancellationToken)
     {
-        return retryHandler.ExecuteAsync(
-            ct => graph.Users[mailboxUpn].ContactFolders[folderId].Contacts[contactId].DeleteAsync(cancellationToken: ct),
-            cancellationToken);
+        try
+        {
+            await retryHandler.ExecuteAsync(
+                ct => graph.Users[mailboxUpn].ContactFolders[folderId].Contacts[contactId].DeleteAsync(cancellationToken: ct),
+                cancellationToken);
+        }
+        catch (Exception ex) when (GraphExceptionDetails.From(ex).IndicatesItemAlreadyDeleted)
+        {
+            // The contact is already gone (e.g. removed by a prior, retried batch attempt).
+            // Deleting an absent item is a no-op, so treat it as a successful delete.
+        }
     }
 
     public async Task<IReadOnlyList<ContactFolder>> GetContactFoldersAsync(string mailboxUpn, CancellationToken cancellationToken)
@@ -294,26 +348,23 @@ public sealed class MailboxContactGraphService(
                     LogRedactor.Identifier(mailboxUpn, _syncOptions), chunk.Length, ex.GetType().Name, graphError.ToSummary());
             }
 
+            // Inspect status codes rather than deserializing bodies: a PATCH can return
+            // 204 No Content, so parsing the (empty) body as a Contact would throw.
+            var statusCodes = await TryGetBatchStatusCodesAsync(batchResponse, mailboxUpn, "update");
+
             foreach (var (stepId, sourceId) in stepToSource)
             {
-                if (batchResponse is not null)
+                if (statusCodes is not null && statusCodes.TryGetValue(stepId, out var status))
                 {
-                    try
-                    {
-                        // PATCH returns 200 or 204. GetResponseByIdAsync returns null for 204.
-                        _ = await batchResponse.GetResponseByIdAsync<Contact>(stepId);
+                    var code = (int)status;
+                    if (code is >= 200 and < 300)
                         continue; // success
-                    }
-                    catch (Exception ex)
-                    {
-                        var graphError = GraphExceptionDetails.From(ex);
-                        logger.LogWarning(
-                            "Batch update item failed for source {SourceId} in {Mailbox}; falling back to individual call. ErrorType={ErrorType} GraphError={GraphError}",
-                            LogRedactor.Identifier(sourceId, _syncOptions),
-                            LogRedactor.Identifier(mailboxUpn, _syncOptions),
-                            ex.GetType().Name,
-                            graphError.ToSummary());
-                    }
+
+                    logger.LogWarning(
+                        "Batch update item returned status {Status} for source {SourceId} in {Mailbox}; falling back to individual call.",
+                        code,
+                        LogRedactor.Identifier(sourceId, _syncOptions),
+                        LogRedactor.Identifier(mailboxUpn, _syncOptions));
                 }
 
                 // Fall back to individual call with retry
@@ -376,26 +427,24 @@ public sealed class MailboxContactGraphService(
                     LogRedactor.Identifier(mailboxUpn, _syncOptions), chunk.Length, ex.GetType().Name, graphError.ToSummary());
             }
 
+            // Inspect status codes rather than deserializing bodies: a successful DELETE
+            // returns 204 No Content, so parsing the (empty) body as a Contact would throw.
+            var statusCodes = await TryGetBatchStatusCodesAsync(batchResponse, mailboxUpn, "delete");
+
             foreach (var (stepId, contactId) in stepToContact)
             {
-                if (batchResponse is not null)
+                if (statusCodes is not null && statusCodes.TryGetValue(stepId, out var status))
                 {
-                    try
-                    {
-                        // DELETE returns 204 No Content. A null return is expected and means success.
-                        _ = await batchResponse.GetResponseByIdAsync<Contact>(stepId);
-                        continue; // success
-                    }
-                    catch (Exception ex)
-                    {
-                        var graphError = GraphExceptionDetails.From(ex);
-                        logger.LogWarning(
-                            "Batch delete item failed for contact {ContactId} in {Mailbox}; falling back to individual call. ErrorType={ErrorType} GraphError={GraphError}",
-                            LogRedactor.Identifier(contactId, _syncOptions),
-                            LogRedactor.Identifier(mailboxUpn, _syncOptions),
-                            ex.GetType().Name,
-                            graphError.ToSummary());
-                    }
+                    var code = (int)status;
+                    // 2xx = deleted; 404 = already gone (e.g. removed by a prior, retried attempt).
+                    if (code is >= 200 and < 300 || code == 404)
+                        continue;
+
+                    logger.LogWarning(
+                        "Batch delete item returned status {Status} for contact {ContactId} in {Mailbox}; falling back to individual call.",
+                        code,
+                        LogRedactor.Identifier(contactId, _syncOptions),
+                        LogRedactor.Identifier(mailboxUpn, _syncOptions));
                 }
 
                 // Fall back to individual call with retry
@@ -418,5 +467,29 @@ public sealed class MailboxContactGraphService(
         }
 
         return failed;
+    }
+
+    private async Task<Dictionary<string, HttpStatusCode>?> TryGetBatchStatusCodesAsync(
+        BatchResponseContentCollection? batchResponse,
+        string mailboxUpn,
+        string operation)
+    {
+        if (batchResponse is null)
+            return null;
+
+        try
+        {
+            return await batchResponse.GetResponsesStatusCodesAsync();
+        }
+        catch (Exception ex)
+        {
+            // Could not read per-item statuses; callers fall back to individual calls.
+            logger.LogWarning(
+                "Could not read batch {Operation} status codes for {Mailbox}; falling back to individual calls. ErrorType={ErrorType}",
+                operation,
+                LogRedactor.Identifier(mailboxUpn, _syncOptions),
+                ex.GetType().Name);
+            return null;
+        }
     }
 }

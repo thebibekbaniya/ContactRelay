@@ -115,7 +115,8 @@ public sealed class SyncOrchestrator(
         catch (Exception ex)
         {
             var graphError = GraphExceptionDetails.From(ex);
-            await repository.FailRunAsync(syncRunId, $"ErrorType={ex.GetType().Name}; {graphError.ToSummary()}", CancellationToken.None);
+            await repository.FailRunAsync(syncRunId, $"ErrorType={ex.GetType().Name}; {graphError.ToSummary()}",
+                CancellationToken.None);
             logger.LogError(
                 "Sync run {SyncRunId} failed. ErrorType={ErrorType} GraphError={GraphError} Elapsed={Elapsed}",
                 syncRunId,
@@ -177,30 +178,63 @@ public sealed class SyncOrchestrator(
                 "Synchronizing mailbox {Mailbox}.",
                 LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions));
 
-            // Resolve folder ID.
-            // Re-use the cached folder ID from the last successful run to skip
-            // GetContactFoldersAsync on every repeat run.
-            IReadOnlyList<Microsoft.Graph.Models.ContactFolder> allFolders = [];
+            // Resolve the managed folder by reconciling against the mailbox's actual folders
+            // every run. The recorded id is not a source of truth (the folder can be deleted
+            // or renamed in Outlook), but it lets us recover a renamed folder in place:
+            //   1. A folder already has the configured name -> use it.
+            //   2. Otherwise, if the recorded id still exists, it was renamed -> rename it
+            //      back, preserving its contacts instead of creating a new (empty) folder
+            //      and re-creating every contact.
+            //   3. Otherwise -> create it.
+            var allFolders =
+                await mailboxContactGraphService.GetContactFoldersAsync(mailbox.UserPrincipalName,
+                    cancellationToken);
 
-            if (!string.IsNullOrWhiteSpace(folderState?.ManagedFolderId) && !dryRun)
+            var folderByName = allFolders.FirstOrDefault(f =>
+                string.Equals(f.DisplayName, managedFolderName, StringComparison.OrdinalIgnoreCase));
+            var renamedFolder = folderByName is null && !string.IsNullOrWhiteSpace(folderState?.ManagedFolderId)
+                ? allFolders.FirstOrDefault(f =>
+                    string.Equals(f.Id, folderState.ManagedFolderId, StringComparison.OrdinalIgnoreCase))
+                : null;
+
+            if (folderByName is not null)
             {
-                folderId = folderState.ManagedFolderId;
-                // Only pay for the folder list when we actually need it for legacy cleanup.
-                if (deleteLegacyFolders)
-                    allFolders =
-                        await mailboxContactGraphService.GetContactFoldersAsync(mailbox.UserPrincipalName,
-                            cancellationToken);
+                folderId = folderByName.Id;
+            }
+            else if (renamedFolder is not null)
+            {
+                folderId = renamedFolder.Id;
+                if (dryRun)
+                {
+                    logger.LogInformation(
+                        "Dry run: managed contact folder in mailbox {Mailbox} was renamed to '{CurrentName}' and would be renamed back to '{FolderName}' on a live run.",
+                        LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions),
+                        renamedFolder.DisplayName,
+                        managedFolderName);
+                }
+                else
+                {
+                    await mailboxContactGraphService.RenameManagedFolderAsync(
+                        mailbox.UserPrincipalName, renamedFolder.Id!, managedFolderName, cancellationToken);
+                    logger.LogInformation(
+                        "Managed contact folder in mailbox {Mailbox} was renamed to '{CurrentName}' in Outlook; renamed back to '{FolderName}' to preserve its contacts.",
+                        LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions),
+                        renamedFolder.DisplayName,
+                        managedFolderName);
+                }
+            }
+            else if (!dryRun)
+            {
+                folderId = await mailboxContactGraphService.EnsureManagedFolderAsync(
+                    mailbox.UserPrincipalName, managedFolderName, allFolders, cancellationToken);
             }
             else
             {
-                allFolders =
-                    await mailboxContactGraphService.GetContactFoldersAsync(mailbox.UserPrincipalName,
-                        cancellationToken);
-                folderId = dryRun
-                    ? allFolders.FirstOrDefault(f =>
-                        string.Equals(f.DisplayName, managedFolderName, StringComparison.OrdinalIgnoreCase))?.Id
-                    : await mailboxContactGraphService.EnsureManagedFolderAsync(mailbox.UserPrincipalName,
-                        managedFolderName, allFolders, cancellationToken);
+                folderId = null;
+                logger.LogInformation(
+                    "Dry run: managed contact folder {FolderName} does not exist in mailbox {Mailbox} and would be created on a live run (DryRun is currently enabled).",
+                    managedFolderName,
+                    LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions));
             }
 
             await repository.UpsertMailboxFolderStateAsync(
@@ -440,6 +474,28 @@ public sealed class SyncOrchestrator(
         catch (Exception ex)
         {
             var graphError = GraphExceptionDetails.From(ex);
+
+            // Some targets can never be synced via Graph (on-premises/hybrid mailbox, an
+            // unlicensed user, or a mail user/contact with no Exchange Online mailbox). That
+            // is an environmental fact, not a ContactRelay failure, so skip the mailbox rather
+            // than counting it as an error that would mark the whole run CompletedWithErrors.
+            if (graphError.IndicatesMailboxNotRestEnabled)
+            {
+                runItems.Add(new SyncRunItemDto(
+                    mailbox.UserPrincipalName, null, SyncAction.Skip, SyncActionResult.Skipped,
+                    "Mailbox is not enabled for Microsoft Graph/REST (on-premises mailbox, no Exchange Online mailbox, or unlicensed); skipped.",
+                    null, ex.GetType().Name));
+                await repository.AddRunItemsBulkAsync(syncRunId, runItems, CancellationToken.None);
+                await repository.UpsertMailboxFolderStateAsync(
+                    mailbox.UserPrincipalName, managedFolderName, folderId,
+                    "Skipped", graphError.ToSummary(), CancellationToken.None);
+                logger.LogWarning(
+                    "Mailbox {Mailbox} is not enabled for Microsoft Graph/REST and was skipped. GraphError={GraphError}",
+                    LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions),
+                    graphError.ToSummary());
+                return new MailboxSyncCounts(0, 0, 0, 0, 0);
+            }
+
             runItems.Add(new SyncRunItemDto(
                 mailbox.UserPrincipalName, null, SyncAction.Error, SyncActionResult.Failed,
                 $"Mailbox sync failed: {graphError.ToSummary()}", null, ex.GetType().Name));
@@ -502,6 +558,17 @@ public sealed class SyncOrchestrator(
                 catch (Exception ex)
                 {
                     var graphError = GraphExceptionDetails.From(ex);
+
+                    // Exchange refuses to delete some folders (e.g. a renamed default
+                    // Contacts folder). The folder can never be removed, so fall back to
+                    // emptying its contents instead, completing the migration intent.
+                    if (graphError.IndicatesFolderCannotBeDeleted)
+                    {
+                        await EmptyLegacyFolderAsync(mailbox, legacyFolderName, legacyFolderId, runItems,
+                            cancellationToken);
+                        continue;
+                    }
+
                     await repository.RecordLegacyFolderCleanupAsync(mailbox.UserPrincipalName, legacyFolderName,
                         legacyFolderId, "Failed", cancellationToken);
                     runItems.Add(new SyncRunItemDto(mailbox.UserPrincipalName, null, SyncAction.Cleanup,
@@ -523,6 +590,64 @@ public sealed class SyncOrchestrator(
                     ? $"Dry-run skipped legacy contact folder '{legacyFolderName}' delete after successful sync."
                     : $"Legacy contact folder '{legacyFolderName}' deleted after successful sync.",
                 legacyFolderId, null));
+        }
+    }
+
+    private async Task EmptyLegacyFolderAsync(
+        TargetMailbox mailbox,
+        string legacyFolderName,
+        string legacyFolderId,
+        List<SyncRunItemDto> runItems,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await mailboxContactGraphService.EmptyManagedFolderAsync(
+                mailbox.UserPrincipalName, legacyFolderId, cancellationToken);
+
+            if (result.Failed == 0)
+            {
+                await repository.RecordLegacyFolderCleanupAsync(mailbox.UserPrincipalName, legacyFolderName,
+                    legacyFolderId, "Emptied", cancellationToken);
+                runItems.Add(new SyncRunItemDto(mailbox.UserPrincipalName, null, SyncAction.Cleanup,
+                    SyncActionResult.Skipped,
+                    $"Legacy contact folder '{legacyFolderName}' could not be deleted by Exchange; its {result.Deleted} contact(s) were removed and the folder was left in place.",
+                    legacyFolderId, null));
+                logger.LogInformation(
+                    "Legacy contact folder {LegacyFolderName} could not be deleted for mailbox {Mailbox}; emptied {DeletedCount} contact(s) instead.",
+                    legacyFolderName,
+                    LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions),
+                    result.Deleted);
+                return;
+            }
+
+            await repository.RecordLegacyFolderCleanupAsync(mailbox.UserPrincipalName, legacyFolderName,
+                legacyFolderId, "Failed", cancellationToken);
+            runItems.Add(new SyncRunItemDto(mailbox.UserPrincipalName, null, SyncAction.Cleanup,
+                SyncActionResult.Failed,
+                $"Legacy contact folder '{legacyFolderName}' could not be deleted by Exchange and {result.Failed} of {result.Deleted + result.Failed} contact(s) could not be removed.",
+                legacyFolderId, null));
+            logger.LogError(
+                "Legacy contact folder {LegacyFolderName} could not be deleted for mailbox {Mailbox} and {FailedCount} contact(s) could not be removed while emptying it.",
+                legacyFolderName,
+                LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions),
+                result.Failed);
+        }
+        catch (Exception ex)
+        {
+            var graphError = GraphExceptionDetails.From(ex);
+            await repository.RecordLegacyFolderCleanupAsync(mailbox.UserPrincipalName, legacyFolderName,
+                legacyFolderId, "Failed", cancellationToken);
+            runItems.Add(new SyncRunItemDto(mailbox.UserPrincipalName, null, SyncAction.Cleanup,
+                SyncActionResult.Failed,
+                $"Legacy contact folder '{legacyFolderName}' could not be deleted or emptied: {graphError.ToSummary()}",
+                legacyFolderId, ex.GetType().Name));
+            logger.LogError(
+                "Legacy contact folder {LegacyFolderName} could not be emptied for mailbox {Mailbox}. ErrorType={ErrorType} GraphError={GraphError}",
+                legacyFolderName,
+                LogRedactor.Identifier(mailbox.UserPrincipalName, _syncOptions),
+                ex.GetType().Name,
+                graphError.ToSummary());
         }
     }
 
